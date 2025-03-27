@@ -1,0 +1,49 @@
+import json
+import boto3
+import uuid
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('UserData')
+
+def lambda_handler(event, context):
+    try:
+        # Extrahiere Daten aus der Anfrage (z. B. aus dem Body einer POST-Anfrage)
+        body = json.loads(event['body'])
+        user_id = str(uuid.uuid4())  # Generiere eine eindeutige ID
+        name = body.get('name')
+        email = body.get('email')
+
+        # Speichere die Daten in DynamoDB
+        table.put_item(
+            Item={
+                'UserID': user_id,
+                'Name': name,
+                'Email': email
+            }
+        )
+
+        # Gib eine Erfolgsmeldung zurück
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'status': 'success',
+                'message': 'Daten erfolgreich gespeichert',
+                'user_id': user_id
+            }),
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': 'https://www.skillupclothing.com'  # Für CORS
+            }
+        }
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'status': 'error',
+                'message': str(e)
+            }),
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': 'https://www.skillupclothing.com'
+            }
+        }
