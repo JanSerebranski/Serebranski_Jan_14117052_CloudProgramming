@@ -1,0 +1,248 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template für die Bereitstellung der statischen Website skillupclothing.com mit dynamischen Anfragen auf AWS.
+
+# Parameter für konfigurierbare Werte
+Parameters:
+  AcmCertificateArn:
+    Type: String
+    Description: ARN des ACM-Zertifikats für CloudFront (muss in us-east-1 erstellt werden)
+  AcmCertificateArnApi:
+    Type: String
+    Description: ARN des ACM-Zertifikats für API Gateway (muss in eu-north-1 erstellt werden)
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3-Bucket, in dem die lambda.zip für die Lambda-Funktion gespeichert ist
+    Default: my-lambda-bucket # Ersetze mit deinem S3-Bucket-Namen
+
+# Ressourcen
+Resources:
+  # S3-Bucket für statisches Hosting
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Bucketმო�:BucketName: iu-hochschule-statische-website
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      AccessControl: Private
+
+  # S3-Bucket-Policy für öffentlichen Zugriff über CloudFront
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::iu-hochschule-statische-website/*
+
+  # CloudFront Origin Access Identity (OAI) für sicheren Zugriff auf S3
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: OAI für S3-Bucket
+
+  # CloudFront-Distribution für globale Bereitstellung
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt S3Bucket.RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOAI}
+        Enabled: true
+        DefaultRootObject: index.html
+        Aliases:
+          - skillupclothing.com
+          - www.skillupclothing.com
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 3600
+          MaxTTL: 86400
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+
+  # Route 53 Hosted Zone
+  Route53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: skillupclothing.com
+
+  # Route 53 A-Record für die Root-Domain (skillupclothing.com)
+  Route53RecordSetRoot:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: skillupclothing.com
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront Hosted Zone ID (fest für CloudFront)
+
+  # Route 53 A-Record für www (www.skillupclothing.com)
+  Route53RecordSetWWW:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: www.skillupclothing.com
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+  # Route 53 A-Record für api (api.skillupclothing.com)
+  Route53RecordSetApi:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: api.skillupclothing.com
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiGatewayDomainName.RegionalDomainName
+        HostedZoneId: !GetAtt ApiGatewayDomainName.RegionalHostedZoneId
+
+  # DynamoDB-Tabelle für Benutzerdaten
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: KirData
+      AttributeDefinitions:
+        - AttributeName: UserID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserID
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # IAM-Rolle für Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt DynamoDBTable.Arn
+
+  # Lambda-Funktion für dynamische Anfragen
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: submitHandler
+      Handler: index.handler
+      Runtime: nodejs14.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: lambda.zip
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: KirData
+
+  # API Gateway für dynamische Anfragen
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: SubmitApi
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: submit
+
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref ApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:eu-north-1:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ApiGatewayMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: prod
+
+  ApiGatewayDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: api.skillupclothing.com
+      RegionalCertificateArn: !Ref AcmCertificateArnApi
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiGatewayBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref ApiGatewayDomainName
+      RestApiId: !Ref ApiGatewayRestApi
+      Stage: prod
+
+  # Lambda-Berechtigung für API Gateway
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:eu-north-1:${AWS::AccountId}:${ApiGatewayRestApi}/*/POST/submit
+
+# Outputs
+Outputs:
+  WebsiteURL:
+    Description: URL der gehosteten Website
+    Value: https://skillupclothing.com
+  ApiURL:
+    Description: URL der API
+    Value: https://api.skillupclothing.com
+  CloudFrontDistributionId:
+    Description: ID der CloudFront-Distribution
+    Value: !Ref CloudFrontDistribution
